@@ -1,0 +1,32 @@
+{
+    "name": "glueful/thallo-subscriptions",
+    "description": "Workspace SaaS billing for Thallo — platform plans and per-workspace subscriptions, as a removable capability pack.",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Michael Tawiah Sowah",
+            "email": "michael@glueful.dev"
+        }
+    ],
+    "version": "0.1.0",
+    "require": {
+        "php": "^8.3",
+        "glueful/thallo-contracts": "*",
+        "glueful/thallo-tenancy": "*",
+        "glueful/extension-contracts": "*",
+        "glueful/subscriptions": "^2.1",
+        "glueful/framework": "^1.74.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Thallo\\Subscriptions\\": "src/"
+        }
+    },
+    "extra": {
+        "glueful": {
+            "provider": "Thallo\\Subscriptions\\SubscriptionsIntegrationServiceProvider"
+        }
+    },
+    "minimum-stability": "stable"
+}
