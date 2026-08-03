@@ -7,15 +7,18 @@ namespace Thallo\Subscriptions;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Container\Container as GluefulContainer;
 use Glueful\Container\Definition\FactoryDefinition;
+use Glueful\Database\Connection;
 use Glueful\Extensions\DeclaresLoadOrder;
 use Glueful\Extensions\ServiceProvider;
 use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
+use Psr\Container\ContainerInterface;
 use Thallo\Contracts\Capability\Capability;
 use Thallo\Contracts\Capability\CapabilityRegistry;
 use Thallo\Subscriptions\Engine\EngineGateway;
 use Thallo\Subscriptions\Http\MetaController;
 use Thallo\Subscriptions\Http\PlansController;
 use Thallo\Subscriptions\Http\WorkspaceBillingController;
+use Thallo\Subscriptions\Purge\SubscriptionsPurgeHandler;
 use Thallo\Subscriptions\Resolver\ThalloSubjectResolver;
 
 use function app;
@@ -105,7 +108,33 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
                 'shared' => true,
                 'autowire' => true,
             ],
+            // Task 10 (Phase B): the pack's fail-closed tenant-purge handler. ALWAYS
+            // registered -- OUTSIDE any capability gate (this provider's services() has
+            // none to begin with) -- and aliased so
+            // `Thallo\Tenancy\TenancyServiceProvider::makePurgeResourceRegistry()` can pick
+            // it up, the exact mechanism `thallo.commerce.purge_handler` already
+            // establishes. No soft-resolve is needed for its own dependencies (unlike
+            // Commerce's purge handler): `EngineGateway` is THIS provider's own
+            // unconditionally-bound service, and it is EngineGateway -- not this
+            // factory -- that soft-resolves the engine per call (see its own docblock),
+            // so the handler stays constructible even when glueful/subscriptions' own
+            // provider is inactive.
+            SubscriptionsPurgeHandler::class => [
+                'factory' => [self::class, 'makeSubscriptionsPurgeHandler'],
+                'shared'  => true,
+                'alias'   => ['thallo.subscriptions.purge_handler'],
+            ],
         ];
+    }
+
+    /** See the {@see SubscriptionsPurgeHandler::class} services() entry above. */
+    public static function makeSubscriptionsPurgeHandler(ContainerInterface $container): SubscriptionsPurgeHandler
+    {
+        return new SubscriptionsPurgeHandler(
+            $container->get(ApplicationContext::class),
+            $container->get(Connection::class),
+            $container->get(EngineGateway::class),
+        );
     }
 
     public function register(ApplicationContext $context): void
