@@ -13,6 +13,7 @@ use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
 use Thallo\Contracts\Capability\Capability;
 use Thallo\Contracts\Capability\CapabilityRegistry;
 use Thallo\Subscriptions\Engine\EngineGateway;
+use Thallo\Subscriptions\Http\PlansController;
 use Thallo\Subscriptions\Resolver\ThalloSubjectResolver;
 
 use function app;
@@ -81,6 +82,13 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
                 'shared' => true,
                 'autowire' => true,
             ],
+            // Task 8 (Phase B): the platform Plans admin API's sole controller. Autowired --
+            // its only dependency is the EngineGateway bound directly above.
+            PlansController::class => [
+                'class' => PlansController::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
         ];
     }
 
@@ -142,5 +150,12 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
             label: 'Subscriptions',
             description: 'Workspace SaaS billing: platform plans and per-workspace subscriptions.',
         ));
+
+        // Gated by ENABLED state (mirrors CommerceIntegrationServiceProvider::boot()): the
+        // user-facing HTTP surface only. Task 8 (Phase B): the platform Plans admin API --
+        // this pack's first route file, extended by Task 9.
+        if ($registry->isEnabled('thallo.subscriptions')) {
+            $this->loadRoutesFrom(__DIR__ . '/../routes/admin-routes.php');
+        }
     }
 }
