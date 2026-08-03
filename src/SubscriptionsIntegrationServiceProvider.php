@@ -11,10 +11,13 @@ use Glueful\Database\Connection;
 use Glueful\Extensions\DeclaresLoadOrder;
 use Glueful\Extensions\ServiceProvider;
 use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
+use Glueful\Extensions\Subscriptions\SubscriptionsServiceProvider as EngineServiceProvider;
+use Glueful\Routing\Router;
 use Psr\Container\ContainerInterface;
 use Thallo\Contracts\Capability\Capability;
 use Thallo\Contracts\Capability\CapabilityRegistry;
 use Thallo\Subscriptions\Engine\EngineGateway;
+use Thallo\Subscriptions\Http\EngineNativeRoutesDenied;
 use Thallo\Subscriptions\Http\MetaController;
 use Thallo\Subscriptions\Http\PlansController;
 use Thallo\Subscriptions\Http\WorkspaceBillingController;
@@ -23,6 +26,27 @@ use Thallo\Subscriptions\Resolver\ThalloSubjectResolver;
 
 use function app;
 
+/**
+ * PLATFORM-AUTHORITY RULING (final-wave fix A, controller decision -- consistent with spec §3's own
+ * "a tenant-grantable `subscriptions.manage` permission is explicitly rejected" ruling):
+ *
+ * glueful/subscriptions' provider unconditionally calls `loadRoutesFrom(vendor/glueful/subscriptions/
+ * routes.php)` from its `boot()`, mounting a COMPLETE second plan-administration API at
+ * `/subscriptions/plans*` behind nothing but `['auth', 'subscriptions_plans_manage']` -- a raw
+ * `PermissionManager::can('subscriptions.plans.manage')` check. Those mounts escape every seam this
+ * pack exists to enforce: the `thallo.subscriptions` capability gate, `tenant_system` +
+ * `content_permission:tenancy.manage` platform authority, and the {@see EngineGateway}'s structured
+ * degradation. Left alone, granting one workspace admin `subscriptions.plans.manage` would let them
+ * edit the GLOBAL plan catalog -- precisely what spec §3 forbids.
+ *
+ * Ruling: in Thallo those native routes are NOT reachable below platform authority. They are made to
+ * behave as ABSENT (404, byte-identical to `Router::dispatch()`'s own unmatched-route response), which
+ * matches capability-off semantics; the only plan-administration surface in this app is
+ * `/v1/admin/subscriptions/plans` ({@see PlansController}), which carries the full platform gate.
+ *
+ * Mechanism (see {@see self::denyEngineNativePlanRoutes()} for the mechanics and why the alternatives
+ * fail): this provider PRE-EMPTS the engine's own route load from `register()`.
+ */
 final class SubscriptionsIntegrationServiceProvider extends ServiceProvider implements DeclaresLoadOrder
 {
     /**
@@ -124,6 +148,15 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
                 'shared'  => true,
                 'alias'   => ['thallo.subscriptions.purge_handler'],
             ],
+            // Final-wave fix A: the route-middleware guard register() mounts the engine's OWN
+            // native plan routes behind. Its alias id is this pack's own (never the engine's
+            // `subscriptions_plans_manage`), so no cross-provider def merge can lose it.
+            EngineNativeRoutesDenied::class => [
+                'class' => EngineNativeRoutesDenied::class,
+                'shared' => true,
+                'autowire' => true,
+                'alias' => [EngineNativeRoutesDenied::ALIAS],
+            ],
         ];
     }
 
@@ -184,6 +217,86 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
                 ),
             ]);
         }
+
+        $this->denyEngineNativePlanRoutes();
+    }
+
+    /**
+     * Enforces the platform-authority ruling in this class's docblock: the engine's native
+     * `/subscriptions/plans*` mounts answer 404 for every caller, in every capability/engine state.
+     *
+     * MECHANISM -- pre-empt the engine's own `loadRoutesFrom()` from `register()`, loading its route
+     * file OURSELVES inside a router group whose first middleware is {@see EngineNativeRoutesDenied}:
+     *
+     *  1. `ExtensionManager` runs EVERY provider's `register()` before ANY provider's `boot()`
+     *     (`registerProviders()` then `boot()`), so this always wins the race regardless of
+     *     `loadAfter()`/`loadPriority()` -- which only order us AFTER the engine within each phase.
+     *  2. `ServiceProvider::loadRoutesFrom()` latches loaded route files by realpath in a
+     *     process-global `self::$loadedRoutes`. Loading the engine's file here therefore makes the
+     *     engine's own `boot()` call a silent no-op -- the routes exist exactly once, ours.
+     *  3. `Router::group()` merges group middleware in stack order and `Route::middleware()` only
+     *     ever APPENDS, so the guard registered by the enclosing group runs BEFORE the file's own
+     *     `['auth', 'subscriptions_plans_manage']`. That is what makes an anonymous probe 404
+     *     rather than 401 -- i.e. genuinely indistinguishable from an unregistered path.
+     *  4. Because we load the engine's OWN file, any route it adds in a future release is covered
+     *     automatically; there is no hardcoded path list here to drift.
+     *
+     * REJECTED alternatives (each verified against the framework source, not assumed):
+     *  - Re-registering the same paths from this pack's route file: `Router::add()` THROWS
+     *    `LogicException("Route already defined")` for a duplicate STATIC route unless routes came
+     *    from cache, so the behaviour would differ between a warm and a cold route cache.
+     *  - Appending a guard to the already-registered `Route` objects in `boot()`: `Route::middleware()`
+     *    appends only, so `auth` + the engine's permission check would still run first (401, not 404),
+     *    and there is no public setter for a route's handler or middleware list.
+     *  - Rebinding the `subscriptions_plans_manage` middleware alias on the container (the
+     *    `ThalloSubjectResolver` `Container::load()` precedent above): workable, but it inherits that
+     *    precedent's compiled-container caveat (the `instanceof GluefulContainer` branch would silently
+     *    skip) and still leaves `auth` running first. A security gate must not depend on the container
+     *    never being compiled; the router is a plain runtime singleton either way.
+     *  - An engine-provided opt-out: there is none -- `SubscriptionsServiceProvider::boot()` calls
+     *    `loadRoutesFrom()` unconditionally, and the vendor package is off-limits here.
+     *
+     * Gated on the engine provider actually being ACTIVE (its `PlanController` binding is the live
+     * probe -- container defs are merged before any `register()` runs, so this is deterministic).
+     * Two reasons, one of them load-bearing: (1) with the engine off there is nothing to pre-empt --
+     * its `boot()` never loads the file, so those paths are already absent; (2)
+     * `Router::executeWithMiddleware()` resolves EVERY middleware in a matched route's stack from the
+     * container BEFORE running any of them, so registering the engine's own file while its
+     * `subscriptions_plans_manage` alias is unbound would turn those paths into 500s instead of 404s
+     * -- strictly worse than leaving them unregistered.
+     */
+    private function denyEngineNativePlanRoutes(): void
+    {
+        if (!class_exists(EngineServiceProvider::class) || !$this->app->has(Router::class)) {
+            return;
+        }
+
+        if (!$this->app->has(\Glueful\Extensions\Subscriptions\Http\PlanController::class)) {
+            return;
+        }
+
+        $providerFile = (new \ReflectionClass(EngineServiceProvider::class))->getFileName();
+        if ($providerFile === false) {
+            return;
+        }
+
+        // Mirrors the engine's own `loadRoutesFrom(__DIR__ . '/../routes.php')` from src/.
+        $routesFile = dirname($providerFile, 2) . '/routes.php';
+        if (!is_file($routesFile)) {
+            return;
+        }
+
+        $router = $this->app->get(Router::class);
+        if (!$router instanceof Router) {
+            return;
+        }
+
+        $router->group(
+            ['middleware' => [EngineNativeRoutesDenied::ALIAS]],
+            function (Router $router) use ($routesFile): void {
+                $this->loadRoutesFrom($routesFile);
+            },
+        );
     }
 
     public function boot(ApplicationContext $context): void
