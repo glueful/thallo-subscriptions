@@ -13,7 +13,9 @@ use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
 use Thallo\Contracts\Capability\Capability;
 use Thallo\Contracts\Capability\CapabilityRegistry;
 use Thallo\Subscriptions\Engine\EngineGateway;
+use Thallo\Subscriptions\Http\MetaController;
 use Thallo\Subscriptions\Http\PlansController;
+use Thallo\Subscriptions\Http\WorkspaceBillingController;
 use Thallo\Subscriptions\Resolver\ThalloSubjectResolver;
 
 use function app;
@@ -86,6 +88,20 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
             // its only dependency is the EngineGateway bound directly above.
             PlansController::class => [
                 'class' => PlansController::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            // Task 9 (Phase B): the workspace billing admin API + meta. Both autowired --
+            // TenantAdministration/SingleStoreTenant/SystemFlags are always-on bindings from
+            // glueful/tenancy's control-plane provider and this pack's own TenancyServiceProvider,
+            // and EngineGateway is bound directly above.
+            MetaController::class => [
+                'class' => MetaController::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            WorkspaceBillingController::class => [
+                'class' => WorkspaceBillingController::class,
                 'shared' => true,
                 'autowire' => true,
             ],

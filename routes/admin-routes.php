@@ -3,7 +3,9 @@
 declare(strict_types=1);
 
 use Glueful\Routing\Router;
+use Thallo\Subscriptions\Http\MetaController;
 use Thallo\Subscriptions\Http\PlansController;
+use Thallo\Subscriptions\Http\WorkspaceBillingController;
 
 /** @var Router $router */
 
@@ -41,5 +43,25 @@ $router->group(
             ->name('thallo.subscriptions.admin.plans.archive');
         $router->post('/plans/import-config', [PlansController::class, 'importConfig'])
             ->name('thallo.subscriptions.admin.plans.import_config');
+
+        // Task 9 (Phase B): the workspace billing admin API + meta -- joins the tenancy
+        // directory with the subscriptions engine. Same group middleware, same
+        // `thallo.subscriptions.admin.*` naming convention as Task 8's Plans routes above.
+        $router->get('/meta', [MetaController::class, 'show'])
+            ->name('thallo.subscriptions.admin.meta');
+        $router->get('/workspaces', [WorkspaceBillingController::class, 'index'])
+            ->name('thallo.subscriptions.admin.workspaces.index');
+        $router->get('/workspaces/{uuid}', [WorkspaceBillingController::class, 'show'])
+            ->name('thallo.subscriptions.admin.workspaces.show');
+        $router->put('/workspaces/{uuid}/plan', [WorkspaceBillingController::class, 'setPlan'])
+            ->name('thallo.subscriptions.admin.workspaces.plan');
+        $router->post('/workspaces/{uuid}/cancel', [WorkspaceBillingController::class, 'cancel'])
+            ->name('thallo.subscriptions.admin.workspaces.cancel');
+        $router->put('/workspaces/{uuid}/overrides/{entitlement}', [WorkspaceBillingController::class, 'upsertOverride'])
+            ->name('thallo.subscriptions.admin.workspaces.overrides.upsert');
+        $router->delete(
+            '/workspaces/{uuid}/overrides/{entitlement}',
+            [WorkspaceBillingController::class, 'deleteOverride'],
+        )->name('thallo.subscriptions.admin.workspaces.overrides.delete');
     },
 );
