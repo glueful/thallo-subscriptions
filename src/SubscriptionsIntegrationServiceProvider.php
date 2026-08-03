@@ -12,6 +12,7 @@ use Glueful\Extensions\ServiceProvider;
 use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
 use Thallo\Contracts\Capability\Capability;
 use Thallo\Contracts\Capability\CapabilityRegistry;
+use Thallo\Subscriptions\Engine\EngineGateway;
 use Thallo\Subscriptions\Resolver\ThalloSubjectResolver;
 
 use function app;
@@ -68,6 +69,15 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
             // docblock for why the DSL merge can't win that id from this provider).
             ThalloSubjectResolver::class => [
                 'class' => ThalloSubjectResolver::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            // Task 7 (Phase B): the lazy three-state engine access seam every later API task
+            // resolves engine services through. Own id, no merge conflict. Shared purely because
+            // it holds no per-request state worth avoiding reuse of -- it probes the container
+            // fresh on every call, never caches a verdict (see EngineGateway's own docblock).
+            EngineGateway::class => [
+                'class' => EngineGateway::class,
                 'shared' => true,
                 'autowire' => true,
             ],
