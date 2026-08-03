@@ -5,12 +5,9 @@ declare(strict_types=1);
 namespace Thallo\Subscriptions;
 
 use Glueful\Bootstrap\ApplicationContext;
-use Glueful\Container\Container as GluefulContainer;
-use Glueful\Container\Definition\FactoryDefinition;
 use Glueful\Database\Connection;
 use Glueful\Extensions\DeclaresLoadOrder;
 use Glueful\Extensions\ServiceProvider;
-use Glueful\Extensions\Subscriptions\Contracts\SubjectResolverInterface;
 use Psr\Container\ContainerInterface;
 use Thallo\Contracts\Capability\Capability;
 use Thallo\Contracts\Capability\CapabilityRegistry;
@@ -42,13 +39,14 @@ use function app;
  * matches capability-off semantics; the only plan-administration surface in this app is
  * `/v1/admin/subscriptions/plans` ({@see PlansController}), which carries the full platform gate.
  *
- * Mechanism: {@see EngineRouteGuardServiceProvider} -- a dedicated, pre-extension-tier provider in
- * this pack whose only job is to load the engine's own route file AHEAD of the engine, behind
- * {@see \Thallo\Subscriptions\Http\EngineNativeRoutesDenied}. It is separate from this provider,
- * and does its work in `boot()` rather than `register()`, for reasons that are load-bearing rather
- * than stylistic -- see that class's docblock (production boots from the extension-provider cache,
- * where NO provider's `register()` runs at all, while this provider must `loadAfter()` the engine
- * and so can never win a `boot()`-time race with it).
+ * Mechanism: {@see EnginePreemptionServiceProvider} -- a dedicated, pre-extension-tier provider in
+ * this pack that loads the engine's own route file AHEAD of the engine, behind
+ * {@see \Thallo\Subscriptions\Http\EngineNativeRoutesDenied} and, in the same pass, re-pins
+ * `SubjectResolverInterface` to this pack's own resolver. It is separate from this provider, and
+ * does its work in `boot()` rather than `register()`, for reasons that are load-bearing rather than
+ * stylistic -- see that class's docblock (production boots from the extension-provider cache, where
+ * NO provider's `register()` runs at all, while this provider must `loadAfter()` the engine and so
+ * can never win a `boot()`-time race with it).
  */
 final class SubscriptionsIntegrationServiceProvider extends ServiceProvider implements DeclaresLoadOrder
 {
@@ -98,8 +96,12 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
                 'shared' => true,
                 'autowire' => true,
             ],
-            // Bound under its OWN id (never SubjectResolverInterface here — see register()'s
-            // docblock for why the DSL merge can't win that id from this provider).
+            // Bound under its OWN id, never `SubjectResolverInterface`: the DSL merge cannot win
+            // that id from this provider (the engine is ordered first and `$defs += $compiled` is
+            // first-wins), so the interface is re-pinned on the runtime container by
+            // {@see EnginePreemptionServiceProvider::rebindSubjectResolver()} instead -- from
+            // boot(), because no provider's register() runs on the cached boots production
+            // requires.
             ThalloSubjectResolver::class => [
                 'class' => ThalloSubjectResolver::class,
                 'shared' => true,
@@ -151,7 +153,7 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
                 'shared'  => true,
                 'alias'   => ['thallo.subscriptions.purge_handler'],
             ],
-            // Final-wave fix A: the route-middleware guard {@see EngineRouteGuardServiceProvider}
+            // Final-wave fix A: the route-middleware guard {@see EnginePreemptionServiceProvider}
             // mounts the engine's OWN native plan routes behind. Bound HERE rather than on that
             // provider deliberately -- `ContainerFactory::loadExtensionDefinitions()` resolves
             // provider defs through `ProviderClassResolver` on EVERY boot, independently of
@@ -175,55 +177,6 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
             $container->get(Connection::class),
             $container->get(EngineGateway::class),
         );
-    }
-
-    public function register(ApplicationContext $context): void
-    {
-        // Boot-order deviation (Task 6, flagged in review): a plain services()/defs() entry for
-        // SubjectResolverInterface::class here CANNOT win over the engine's own DefaultSubjectResolver
-        // binding, even though this provider loads AFTER the engine (loadAfter() above). Container
-        // extension-defs are merged id-by-id across providers in LOAD order via `$defs += $compiled`
-        // (Glueful\Container\Bootstrap\ContainerFactory::loadExtensionDefinitions -- first-registered
-        // id wins); `loadAfter`/`loadPriority`(100) place this provider's services() AFTER the
-        // engine's in that same merge, so the engine's id would always be registered first and ours
-        // silently dropped. Proven empirically: a plain SubjectResolverInterface entry in services()
-        // above resolved to Glueful\Extensions\Subscriptions\Resolution\DefaultSubjectResolver, not
-        // ThalloSubjectResolver.
-        //
-        // Fix: rebind the id directly on the already-built runtime container from register(), which
-        // runs AFTER ContainerFactory::create() has finished merging every provider's defs and BEFORE
-        // anything resolves/caches SubjectResolverInterface as a singleton (register() itself never
-        // touches it, and neither this provider's nor the engine's boot() resolves it eagerly).
-        // Mirrors the framework's OWN precedent for this exact pattern -- Framework::
-        // registerContextServices() re-pins ApplicationContext/RequestLifecycle post-merge the same
-        // way, guarded by the same `instanceof GluefulContainer` check.
-        //
-        // CAVEAT (real trigger, not a hypothetical future deploy step): `ContainerFactory::create()`
-        // AUTO-COMPILES the container on every single boot whenever `APP_ENV=production &&
-        // !APP_DEBUG` (Glueful\Framework::buildContainer() computes `$prod` from exactly that pair,
-        // then calls `ContainerFactory::create($context, $prod)`) -- there is no separate CLI
-        // "container:compile" step to opt into or out of. Today that inline compile always THROWS
-        // and falls back to the plain (`GluefulContainer`) container, for two reasons this pack does
-        // NOT own: (1) `ContainerCompiler::compile()` rejects any `FactoryDefinition` outright, and
-        // the engine registers several (`PlanCatalog`, `EntitlementResolver`, ...); (2) the compiler
-        // cannot serialize the `ApplicationContext` `ValueDefinition` `ContainerFactory` itself binds
-        // (see vendor `StrictLaneCompiledContainerGateTest`'s docblock for the same finding). If a
-        // routine `composer update` ever fixes either upstream limitation, compilation would start
-        // SUCCEEDING in production: `$this->app` would then be a `CompiledContainer`, this whole
-        // `instanceof GluefulContainer` branch would silently skip, and `SubjectResolverInterface`
-        // would resolve to the engine's `DefaultSubjectResolver` in production with no error anywhere.
-        // `tests/Integration/Subscriptions/SubjectResolverCompiledContainerGateTest.php` guards
-        // exactly this: it drives the REAL `ContainerFactory::create($context, prod: true)` path and
-        // turns red the day compilation starts succeeding, pointing straight back here.
-        if ($this->app instanceof GluefulContainer) {
-            $this->app->load([
-                SubjectResolverInterface::class => new FactoryDefinition(
-                    SubjectResolverInterface::class,
-                    static fn (\Psr\Container\ContainerInterface $c): ThalloSubjectResolver
-                        => $c->get(ThalloSubjectResolver::class),
-                ),
-            ]);
-        }
     }
 
     public function boot(ApplicationContext $context): void

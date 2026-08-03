@@ -26,7 +26,7 @@ use Symfony\Component\HttpFoundation\Request;
  * (`Response::error('Not Found', 404)` -- exactly what `Router::dispatch()` returns when `match()`
  * finds nothing), so the native mounts are indistinguishable from absent for every caller,
  * authenticated or not. It is deliberately the FIRST middleware on those routes (see
- * {@see \Thallo\Subscriptions\SubscriptionsIntegrationServiceProvider::denyEngineNativePlanRoutes()}),
+ * {@see \Thallo\Subscriptions\EnginePreemptionServiceProvider::denyEngineNativePlanRoutes()}),
  * so neither `auth` nor the engine's own permission check ever runs -- an anonymous probe cannot
  * even tell the engine is installed by getting a 401 where an unknown path would 404.
  */
