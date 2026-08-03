@@ -66,6 +66,30 @@ final class EngineGateway
         return self::READY;
     }
 
+    /**
+     * The single-probe-per-ACTION entry point (final-wave fix B): resolves the engine state ONCE and
+     * hands back an {@see EngineServices} snapshot whose accessors never re-probe. Controllers that
+     * need more than one engine service in a single action MUST use this instead of calling
+     * `subscriptions()`/`plans()`/`overrides()` repeatedly -- each of those pays a full
+     * {@see SubscriptionSchemaReadiness} probe (5 `hasTable()` + 27 `hasColumn()` uncached queries).
+     *
+     * This does NOT cache across calls or across requests: every `requireServices()` call probes
+     * fresh, exactly like the individual accessors do. See {@see EngineServices}' docblock for why
+     * that is the whole and only relaxation of this class's no-caching rule.
+     *
+     * @throws EngineUnavailableException when the engine is disabled or its schema isn't ready.
+     */
+    public function requireServices(): EngineServices
+    {
+        $this->requireReady();
+
+        return new EngineServices($this->context);
+    }
+
+    /**
+     * Single-service convenience for actions that need exactly ONE engine service (and therefore
+     * already pay exactly one probe). Kept as the gateway's original public surface.
+     */
     public function subscriptions(): SubscriptionService
     {
         $this->requireReady();
