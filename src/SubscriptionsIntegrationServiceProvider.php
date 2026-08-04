@@ -11,10 +11,12 @@ use Glueful\Extensions\ServiceProvider;
 use Psr\Container\ContainerInterface;
 use Thallo\Contracts\Capability\Capability;
 use Thallo\Contracts\Capability\CapabilityRegistry;
+use Thallo\Subscriptions\Checkout\PayviaCheckoutGateway;
 use Thallo\Subscriptions\Engine\EngineGateway;
 use Thallo\Subscriptions\Http\EngineNativeRoutesDenied;
 use Thallo\Subscriptions\Http\MetaController;
 use Thallo\Subscriptions\Http\PlansController;
+use Thallo\Subscriptions\Http\SelfBillingController;
 use Thallo\Subscriptions\Http\SelfServeSettingsController;
 use Thallo\Subscriptions\Http\WorkspaceBillingController;
 use Thallo\Subscriptions\Purge\SubscriptionsPurgeHandler;
@@ -163,6 +165,33 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
                 'shared' => true,
                 'autowire' => true,
             ],
+            // Task 16 (Phase C, workspace self-serve checkout plan, spec §5.2), fix round
+            // (code review, Critical C1): the lazy soft-resolution seam over Payvia's checkout
+            // ledger, mirroring EngineGateway exactly. Its only dependency is the always-on
+            // ApplicationContext -- never Payvia's own services directly -- so it autowires
+            // cleanly whether or not glueful/payvia's provider is active; `isAvailable()` is
+            // what tells callers whether it actually is.
+            PayviaCheckoutGateway::class => [
+                'class' => PayviaCheckoutGateway::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            // The workspace-scoped self-serve billing API's sole controller
+            // (`/v1/admin/billing/{meta,checkout}`). Autowired -- EVERY dependency here is
+            // unconditionally constructible regardless of whether glueful/payvia,
+            // glueful/subscriptions, or glueful/users are enabled (see this controller's own
+            // docblock, fix round C1): EngineGateway/SelfServeGatewayCapability/
+            // PayviaCheckoutGateway all soft-probe their extension per call, `AdminUrlProvider`
+            // is an established nullable soft dependency (thallo-render's own idiom for the same
+            // contract), and `UserRepository` is resolved lazily inside the controller rather
+            // than constructor-injected. `WorkspaceCheckoutCoordinator` is deliberately NOT bound
+            // here at all -- see its own docblock for why it is built with `new` per request
+            // instead.
+            SelfBillingController::class => [
+                'class' => SelfBillingController::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
             // Task 10 (Phase B): the pack's fail-closed tenant-purge handler. ALWAYS
             // registered -- OUTSIDE any capability gate (this provider's services() has
             // none to begin with) -- and aliased so
@@ -220,6 +249,10 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
         // this pack's first route file, extended by Task 9.
         if ($registry->isEnabled('thallo.subscriptions')) {
             $this->loadRoutesFrom(__DIR__ . '/../routes/admin-routes.php');
+            // Task 16 (Phase C, spec §5.2): the workspace-scoped self-serve billing API. Same
+            // capability gate as the platform admin routes above -- capability off means BOTH
+            // route files are entirely absent (404).
+            $this->loadRoutesFrom(__DIR__ . '/../routes/billing-routes.php');
         }
     }
 }
