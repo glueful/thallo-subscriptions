@@ -15,9 +15,12 @@ use Thallo\Subscriptions\Engine\EngineGateway;
 use Thallo\Subscriptions\Http\EngineNativeRoutesDenied;
 use Thallo\Subscriptions\Http\MetaController;
 use Thallo\Subscriptions\Http\PlansController;
+use Thallo\Subscriptions\Http\SelfServeSettingsController;
 use Thallo\Subscriptions\Http\WorkspaceBillingController;
 use Thallo\Subscriptions\Purge\SubscriptionsPurgeHandler;
 use Thallo\Subscriptions\Resolver\ThalloSubjectResolver;
+use Thallo\Subscriptions\Settings\SelfServeCheckoutSetting;
+use Thallo\Subscriptions\Settings\SelfServeGatewayCapability;
 
 use function app;
 
@@ -126,7 +129,9 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
             // Task 9 (Phase B): the workspace billing admin API + meta. Both autowired --
             // TenantAdministration/SingleStoreTenant/SystemFlags are always-on bindings from
             // glueful/tenancy's control-plane provider and this pack's own TenancyServiceProvider,
-            // and EngineGateway is bound directly above.
+            // and EngineGateway is bound directly above. Task 15 additionally wires
+            // SelfServeCheckoutSetting/SelfServeGatewayCapability (bound below), which
+            // MetaController now also depends on to expose the switch + capability state.
             MetaController::class => [
                 'class' => MetaController::class,
                 'shared' => true,
@@ -134,6 +139,27 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
             ],
             WorkspaceBillingController::class => [
                 'class' => WorkspaceBillingController::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            // Task 15 (Phase C, workspace self-serve checkout plan, spec §5.1): the
+            // `self_serve_checkout_enabled` operator kill switch. SelfServeCheckoutSetting's only
+            // dependency is the always-on SystemFlags binding above; SelfServeGatewayCapability's
+            // is the always-on ApplicationContext -- both autowire cleanly regardless of whether
+            // payvia's own provider is active (it soft-probes the container per call, per its own
+            // docblock). SelfServeSettingsController depends on both.
+            SelfServeCheckoutSetting::class => [
+                'class' => SelfServeCheckoutSetting::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            SelfServeGatewayCapability::class => [
+                'class' => SelfServeGatewayCapability::class,
+                'shared' => true,
+                'autowire' => true,
+            ],
+            SelfServeSettingsController::class => [
+                'class' => SelfServeSettingsController::class,
                 'shared' => true,
                 'autowire' => true,
             ],

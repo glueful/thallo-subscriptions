@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Glueful\Routing\Router;
 use Thallo\Subscriptions\Http\MetaController;
 use Thallo\Subscriptions\Http\PlansController;
+use Thallo\Subscriptions\Http\SelfServeSettingsController;
 use Thallo\Subscriptions\Http\WorkspaceBillingController;
 
 /** @var Router $router */
@@ -49,6 +50,14 @@ $router->group(
         // `thallo.subscriptions.admin.*` naming convention as Task 8's Plans routes above.
         $router->get('/meta', [MetaController::class, 'show'])
             ->name('thallo.subscriptions.admin.meta');
+
+        // Task 15 (Phase C, workspace self-serve checkout plan, spec §5.1): the
+        // `self_serve_checkout_enabled` operator kill switch. Same group middleware, same
+        // `thallo.subscriptions.admin.*` naming convention -- this is a PLATFORM-scope setting
+        // (whether ANY workspace may self-serve checkout), never a per-workspace resource.
+        $router->put('/self-serve', [SelfServeSettingsController::class, 'update'])
+            ->name('thallo.subscriptions.admin.self_serve.update');
+
         $router->get('/workspaces', [WorkspaceBillingController::class, 'index'])
             ->name('thallo.subscriptions.admin.workspaces.index');
         $router->get('/workspaces/{uuid}', [WorkspaceBillingController::class, 'show'])
