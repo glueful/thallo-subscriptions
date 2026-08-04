@@ -15,7 +15,9 @@
         "glueful/thallo-contracts": "*",
         "glueful/thallo-tenancy": "*",
         "glueful/extension-contracts": "*",
-        "glueful/subscriptions": "^2.1",
+        "glueful/subscriptions": "^2.2",
+        "glueful/payvia": "^2.5",
+        "glueful/users": "^2.3.2",
         "glueful/framework": "^1.74.0"
     },
     "autoload": {
