@@ -254,5 +254,16 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
             // route files are entirely absent (404).
             $this->loadRoutesFrom(__DIR__ . '/../routes/billing-routes.php');
         }
+
+        // Task 17 (design spec §3.8/§5.2): the platform-authority `subscriptions:checkout:resolve`
+        // console command, discovered OUTSIDE the `thallo.subscriptions` capability gate --
+        // mirrors thallo-tenancy's/thallo-commerce's own established `discoverCommands()`
+        // convention for maintenance/operator surfaces (see their own `boot()` methods): a
+        // console command is never mounted through routes at all, so it has no capability-off
+        // 404 to preserve, and every command class in this pack's `Console/` directory resolves
+        // ITS OWN dependencies lazily inside `execute()` (never eagerly here), so `php glueful
+        // ...` stays safe to run even when this pack's capability is off or glueful/payvia/
+        // glueful/subscriptions happen to be inactive.
+        $this->discoverCommands('Thallo\\Subscriptions\\Console', __DIR__ . '/Console');
     }
 }

@@ -6,27 +6,38 @@ namespace Thallo\Subscriptions\Http;
 
 use Glueful\Auth\UserIdentity;
 use Glueful\Bootstrap\ApplicationContext;
+use Glueful\Events\EventService;
 use Glueful\Extensions\Payvia\Checkout\CheckoutUnavailableException;
 use Glueful\Extensions\Payvia\Checkout\IdempotencyConflictException;
 use Glueful\Extensions\Payvia\Checkout\OriginationLiveException;
 use Glueful\Extensions\Payvia\Checkout\SubscriptionCheckoutResult;
+use Glueful\Extensions\Payvia\Contracts\SubscriptionCancellationModeProvider;
+use Glueful\Extensions\Payvia\Contracts\SubscriptionCapableGateway;
+use Glueful\Extensions\Payvia\Contracts\SubscriptionCheckoutLifecycleCapableGateway;
 use Glueful\Extensions\Subscriptions\CheckoutReservationException;
 use Glueful\Extensions\Subscriptions\Plans\PlanPurchasability;
+use Glueful\Extensions\Subscriptions\Subject;
 use Glueful\Extensions\Users\Repositories\UserRepository;
 use Glueful\Http\Response;
 use Glueful\Routing\Attributes\ApiOperation;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\Request;
 use Thallo\Contracts\Settings\AdminUrlProvider;
+use Thallo\Subscriptions\Checkout\CheckoutReservationRelease;
 use Thallo\Subscriptions\Checkout\PayviaCheckoutGateway;
 use Thallo\Subscriptions\Checkout\PayviaUnavailableException;
+use Thallo\Subscriptions\Checkout\ReservationSettledException;
 use Thallo\Subscriptions\Checkout\WorkspaceCheckoutCoordinator;
 use Thallo\Subscriptions\Engine\EngineGateway;
 use Thallo\Subscriptions\Engine\EngineServices;
 use Thallo\Subscriptions\Engine\EngineUnavailableException;
+use Thallo\Subscriptions\Events\WorkspaceBillingCancellationRequested;
 use Thallo\Subscriptions\Settings\SelfServeCheckoutSetting;
 use Thallo\Subscriptions\Settings\SelfServeGatewayCapability;
 use Thallo\Tenancy\Tenant\SingleStoreTenant;
+
+use function app;
+use function db;
 
 /**
  * Task 16 (Phase C, workspace self-serve checkout plan, spec §5.2): `GET /v1/admin/billing/meta`
@@ -337,6 +348,303 @@ final class SelfBillingController
         return $this->respondForResult($result);
     }
 
+    /**
+     * Task 17 (design spec §5.2's `POST /cancel` bullet): cancel through the workspace's
+     * ACTIVE gateway. Deliberately NEVER gated by `self_serve_checkout_enabled` (spec §1:
+     * "cancel is never gated by the switch") -- no check of {@see SelfServeCheckoutSetting}
+     * appears anywhere in this method, unlike {@see self::checkout()}.
+     *
+     * Refusal order (each stage needs the previous one's result to even ask its own question):
+     * engine unavailable (structured 409, needed to read the projected row at all) -> row has no
+     * `provider_subscription_id` (`not_provider_managed` 409) -> Payvia's `GatewayManager`
+     * unavailable or the row's own `provider_gateway` does not resolve to a configured/enabled
+     * driver (`payvia_unavailable` 409, needed to know the driver's declared modes at all) ->
+     * `mode` not one of the driver's declared {@see SubscriptionCancellationModeProvider::
+     * cancellationModes()} (422 `invalid_cancellation_mode` -- a driver that does not implement
+     * the capability declares NO modes, so every `mode` value is refused this same way, per spec
+     * §3.7).
+     *
+     * ZERO subscription-row writes: this method never calls any engine mutator -- the provider
+     * cancel call and the audit event are the entire effect. Webhooks remain the sole authority
+     * for projecting the eventual `canceled`/`non_renewing` outcome (spec §3.7).
+     */
+    #[ApiOperation(summary: 'Cancel a workspace subscription', tags: ['Thallo Subscriptions'])]
+    public function cancel(Request $request): Response
+    {
+        $actorUuid = $this->actorUuid($request);
+        if ($actorUuid === null) {
+            return Response::error('Authentication is required.', 401);
+        }
+
+        $workspaceUuid = $this->resolveWorkspace();
+        if ($workspaceUuid instanceof Response) {
+            return $workspaceUuid;
+        }
+
+        try {
+            $engine = $this->gateway->requireServices();
+        } catch (EngineUnavailableException $e) {
+            return $this->engineUnavailable($e);
+        }
+
+        $subscription = $engine->subscriptions()->current($workspaceUuid);
+        $providerSubscriptionId = $this->stringField($subscription, 'provider_subscription_id');
+        if ($subscription === null || $providerSubscriptionId === '') {
+            return Response::error(
+                'This workspace has no provider-managed subscription to cancel.',
+                409,
+                ['code' => 'not_provider_managed'],
+            );
+        }
+        $providerGateway = $this->stringField($subscription, 'provider_gateway');
+
+        if (!$this->payvia->hasGatewayManager()) {
+            return $this->payviaUnavailableResponse();
+        }
+        try {
+            $driver = $this->payvia->gatewayManager()->gateway($providerGateway);
+        } catch (\Throwable) {
+            return $this->payviaUnavailableResponse();
+        }
+
+        $modes = $driver instanceof SubscriptionCancellationModeProvider ? $driver->cancellationModes() : [];
+        $payload = $this->jsonBody($request);
+        $mode = is_string($payload['mode'] ?? null) ? trim($payload['mode']) : '';
+        if ($mode === '' || !in_array($mode, $modes, true) || !$driver instanceof SubscriptionCapableGateway) {
+            return Response::error(
+                'This cancellation mode is not supported by the active payment gateway.',
+                422,
+                ['code' => 'invalid_cancellation_mode', 'modes' => $modes],
+            );
+        }
+
+        $driver->cancelSubscription($providerSubscriptionId, $mode === 'stop_renewal');
+
+        $this->events()->dispatch(new WorkspaceBillingCancellationRequested(
+            $workspaceUuid,
+            $actorUuid,
+            (string) ($subscription['uuid'] ?? ''),
+            $mode,
+            $providerGateway,
+            $providerSubscriptionId,
+        ));
+
+        return Response::success(['mode' => $mode], 'Cancellation requested.');
+    }
+
+    /**
+     * Task 17 (design spec §5.2's `POST /checkout/abandon` bullet, spec §3.1/§3.3). Resolves the
+     * workspace's LIVE origination (guard-bound -- never any other origination), invokes payvia's
+     * `SubscriptionCheckoutLifecycleCapableGateway::abandonSubscriptionCheckout()`, and proceeds
+     * ONLY on `confirmed_dead`.
+     *
+     * **Ordering, spelled out because it is the entire safety property of this method**: every
+     * refusal that does NOT need the subscriptions engine (no live guard, no gateway/capability,
+     * `still_live`/`unsupported`/`unknown`) is resolved BEFORE the engine is ever probed -- an
+     * engine outage must never block reporting e.g. `checkout_still_live` for a case that was
+     * never going to touch the engine anyway. Only once the provider has said `confirmed_dead`
+     * does {@see self::finishAbandon()} run, and there ALL THREE remaining writes -- the
+     * settlement check/reservation release
+     * ({@see CheckoutReservationRelease::releaseOrDetectSettled()}), the origination's `pending ->
+     * abandoned` transition, and the subject guard's release back to `open` -- execute inside ONE
+     * transaction, in that order. A settled reservation (provider fields already present -- the
+     * checkout actually completed) throws before either ledger write, aborting the WHOLE
+     * abandonment with 409 `reservation_settled` and rolling back atomically; a refused
+     * transition/guard-release equally rolls the reservation release back. Marking a completed
+     * checkout `abandoned`, or leaving any one of the three writes applied without the other two,
+     * is therefore impossible.
+     */
+    #[ApiOperation(summary: 'Abandon the workspace\'s stuck pending checkout', tags: ['Thallo Subscriptions'])]
+    public function abandon(Request $request): Response
+    {
+        $actorUuid = $this->actorUuid($request);
+        if ($actorUuid === null) {
+            return Response::error('Authentication is required.', 401);
+        }
+
+        $workspaceUuid = $this->resolveWorkspace();
+        if ($workspaceUuid instanceof Response) {
+            return $workspaceUuid;
+        }
+
+        $payviaUnavailableReason = $this->payvia->unavailableReason();
+        if ($payviaUnavailableReason !== null) {
+            return Response::error(
+                'The checkout payment system is unavailable on this platform.',
+                409,
+                ['code' => PayviaUnavailableException::CODE, 'reason' => $payviaUnavailableReason],
+            );
+        }
+
+        $subjectKey = WorkspaceCheckoutCoordinator::subjectKey($workspaceUuid);
+        $guard = $this->payvia->guards()->findBySubject($this->context, $this->payvia->tenantUuid(), $subjectKey);
+        $originationUuid = is_string($guard['origination_uuid'] ?? null) ? $guard['origination_uuid'] : null;
+        if ($guard === null || (string) ($guard['state'] ?? '') !== 'live' || $originationUuid === null) {
+            return Response::error(
+                'This workspace has no live checkout to abandon.',
+                409,
+                ['code' => 'no_live_checkout'],
+            );
+        }
+
+        $origination = $this->payvia->originations()->findByUuid($originationUuid);
+        if ($origination === null || (string) $origination['status'] !== 'pending') {
+            // Not a stuck `pending` session (e.g. `initializing`, or already `provider_observed`)
+            // -- this endpoint only ever resolves a hosted, provider-verifiable pending checkout.
+            return Response::error(
+                'This checkout is still live and cannot be abandoned yet.',
+                409,
+                ['code' => 'checkout_still_live'],
+            );
+        }
+
+        if (!$this->payvia->hasGatewayManager()) {
+            return $this->payviaUnavailableResponse();
+        }
+        try {
+            $driver = $this->payvia->gatewayManager()->gateway((string) $origination['gateway']);
+        } catch (\Throwable) {
+            return $this->payviaUnavailableResponse();
+        }
+
+        if (!$driver instanceof SubscriptionCheckoutLifecycleCapableGateway) {
+            return $this->checkoutAbandonmentUnsupportedResponse();
+        }
+
+        $reference = is_string($origination['checkout_reference'] ?? null)
+            ? trim($origination['checkout_reference'])
+            : '';
+        if ($reference === '') {
+            return $this->checkoutAbandonUnknownResponse();
+        }
+
+        try {
+            $outcome = $driver->abandonSubscriptionCheckout($reference);
+        } catch (\Throwable) {
+            return $this->checkoutAbandonUnknownResponse();
+        }
+
+        return match ($outcome) {
+            'still_live' => Response::error(
+                'This checkout is still live and cannot be abandoned.',
+                409,
+                ['code' => 'checkout_still_live'],
+            ),
+            'unsupported' => $this->checkoutAbandonmentUnsupportedResponse(),
+            'confirmed_dead' => $this->finishAbandon($workspaceUuid, $subjectKey, $originationUuid),
+            default => $this->checkoutAbandonUnknownResponse(),
+        };
+    }
+
+    /**
+     * The `confirmed_dead` finishing sequence -- see {@see self::abandon()}'s own docblock for why
+     * the reservation check happens FIRST, before either ledger write.
+     *
+     * Fix round (code review Important #1): the settlement check/release, the origination
+     * transition, and the guard release ALL run inside ONE transaction -- every repository
+     * involved (`SubscriptionService`'s underlying repository, `CheckoutOriginationRepository`,
+     * `CheckoutSubjectGuardRepository`) resolves against the SAME request-scoped container
+     * `Connection`, and `SubscriptionService::releaseCheckoutReservation()`'s own internal
+     * `db()->transaction()` nests as a SAVEPOINT inside this outer one (the identical
+     * nested-transaction discipline `reserveCheckoutFor()` already relies on elsewhere in this
+     * pack). A settled reservation now throws INSIDE the transaction -- rolling back not only
+     * itself but the origination transition/guard release that follow it, so it is impossible for
+     * ANY of the three writes to be observed alone. A refused origination transition or guard
+     * release (a race, or a concurrent operator reconciliation) equally rolls the reservation
+     * release back, so the whole abandonment commits or fails as one atomic unit.
+     */
+    private function finishAbandon(string $workspaceUuid, string $subjectKey, string $originationUuid): Response
+    {
+        try {
+            $engine = $this->gateway->requireServices();
+        } catch (EngineUnavailableException $e) {
+            return $this->engineUnavailable($e);
+        }
+
+        $subject = Subject::tenant($workspaceUuid);
+
+        try {
+            db($this->context)->transaction(function () use ($engine, $subject, $originationUuid, $subjectKey): void {
+                $settled = CheckoutReservationRelease::releaseOrDetectSettled(
+                    $engine->subscriptions(),
+                    $subject,
+                    $originationUuid,
+                );
+                if ($settled) {
+                    throw new ReservationSettledException($originationUuid);
+                }
+
+                $transitioned = $this->payvia->originations()
+                    ->transition($this->context, $originationUuid, 'pending', 'abandoned');
+                if (!$transitioned) {
+                    throw new \RuntimeException('checkout_abandon_conflict: origination transition refused');
+                }
+
+                $released = $this->payvia->guards()->release(
+                    $this->context,
+                    $this->payvia->tenantUuid(),
+                    $subjectKey,
+                    $originationUuid,
+                );
+                if (!$released) {
+                    throw new \RuntimeException('checkout_abandon_conflict: guard release refused');
+                }
+            });
+        } catch (ReservationSettledException) {
+            return Response::error(
+                'This checkout already completed and cannot be abandoned.',
+                409,
+                ['code' => 'reservation_settled'],
+            );
+        } catch (\Throwable) {
+            return Response::error(
+                'This checkout changed state before it could be abandoned; please retry.',
+                409,
+                ['code' => 'checkout_abandon_conflict'],
+            );
+        }
+
+        return Response::success(['status' => 'abandoned'], 'Checkout abandoned.');
+    }
+
+    private function payviaUnavailableResponse(): Response
+    {
+        return Response::error(
+            'The checkout payment system is unavailable on this platform.',
+            409,
+            ['code' => PayviaUnavailableException::CODE],
+        );
+    }
+
+    private function checkoutAbandonmentUnsupportedResponse(): Response
+    {
+        return Response::error(
+            'This payment gateway does not support abandoning a checkout attempt.',
+            409,
+            ['code' => 'checkout_abandonment_unsupported'],
+        );
+    }
+
+    private function checkoutAbandonUnknownResponse(): Response
+    {
+        return Response::error(
+            'Whether this checkout attempt is still live could not be determined; please retry shortly.',
+            409,
+            ['code' => 'checkout_abandon_unknown'],
+        );
+    }
+
+    /** @param array<string,mixed>|null $row */
+    private function stringField(?array $row, string $key): string
+    {
+        if ($row === null) {
+            return '';
+        }
+        $value = $row[$key] ?? null;
+
+        return is_string($value) ? trim($value) : '';
+    }
+
     // ------------------------------------------------------------------
     // Workspace + actor resolution
     // ------------------------------------------------------------------
@@ -393,6 +701,16 @@ final class SelfBillingController
         $repository = $container->get(UserRepository::class);
 
         return $repository instanceof UserRepository ? $repository : null;
+    }
+
+    /**
+     * `EventService` is a core framework service (always bound, unlike the soft dependencies
+     * elsewhere in this controller) -- resolved lazily here purely to match this class's own
+     * established per-call-resolution style, never because it might be absent.
+     */
+    private function events(): EventService
+    {
+        return app($this->context, EventService::class);
     }
 
     /**
