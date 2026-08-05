@@ -9,8 +9,10 @@ use Glueful\Database\Connection;
 use Glueful\Extensions\DeclaresLoadOrder;
 use Glueful\Extensions\ServiceProvider;
 use Psr\Container\ContainerInterface;
+use Thallo\Contracts\Billing\PlanCheckoutUrlResolver;
 use Thallo\Contracts\Capability\Capability;
 use Thallo\Contracts\Capability\CapabilityRegistry;
+use Thallo\Subscriptions\Bridge\AdminBillingPlanCheckoutUrlResolver;
 use Thallo\Subscriptions\Checkout\PayviaCheckoutGateway;
 use Thallo\Subscriptions\Engine\EngineGateway;
 use Thallo\Subscriptions\Http\EngineNativeRoutesDenied;
@@ -220,6 +222,19 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
                 'shared' => true,
                 'autowire' => true,
                 'alias' => [EngineNativeRoutesDenied::ALIAS],
+            ],
+            // Task 18 (Phase C, spec §5.4): the pricing-blocks -> billing deep-link bridge,
+            // bound under the CONTRACT id (never this pack's own class id) so thallo-render's
+            // soft `has(PlanCheckoutUrlResolver::class)` probe picks it up without importing
+            // this pack. Own id -- no merge conflict possible. Holds no constructor
+            // dependencies at all (see its own docblock: every collaborator is resolved off
+            // the ApplicationContext passed to resolve(), per call), so it autowires
+            // trivially regardless of whether payvia, glueful/subscriptions, or thallo-render
+            // itself are active.
+            PlanCheckoutUrlResolver::class => [
+                'class' => AdminBillingPlanCheckoutUrlResolver::class,
+                'shared' => true,
+                'autowire' => true,
             ],
         ];
     }
