@@ -27,7 +27,12 @@
     },
     "extra": {
         "glueful": {
-            "provider": "Thallo\\Subscriptions\\SubscriptionsIntegrationServiceProvider"
+            "provider": "Thallo\\Subscriptions\\SubscriptionsIntegrationServiceProvider",
+            "requires": {
+                "glueful": ">=1.79.0",
+                "extensions": []
+            },
+            "migrations": "none"
         }
     },
     "minimum-stability": "stable"
