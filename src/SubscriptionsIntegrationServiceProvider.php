@@ -257,6 +257,7 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
             'thallo.subscriptions',
             label: 'Subscriptions',
             description: 'Workspace SaaS billing: platform plans and per-workspace subscriptions.',
+            owningPackage: 'glueful/subscriptions',
         ));
 
         // Gated by ENABLED state (mirrors CommerceIntegrationServiceProvider::boot()): the
