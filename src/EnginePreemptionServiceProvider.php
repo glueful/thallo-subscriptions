@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Thallo\Subscriptions;
 
 use Glueful\Bootstrap\ApplicationContext;
-use Glueful\Container\Container as GluefulContainer;
+use Glueful\Container\RebindableContainer;
 use Glueful\Container\Definition\FactoryDefinition;
 use Glueful\Extensions\DeclaresLoadOrder;
 use Glueful\Extensions\ServiceProvider;
@@ -28,7 +28,7 @@ use Thallo\Subscriptions\Resolver\ThalloSubjectResolver;
  *     engine's `DefaultSubjectResolver`). The only way to win the id is to rebind it on the
  *     already-built runtime container — the framework's own precedent for exactly this
  *     (`Framework::registerContextServices()` re-pins `ApplicationContext`/`RequestLifecycle`
- *     post-merge the same way, behind the same `instanceof GluefulContainer` guard).
+ *     post-merge the same way, behind the same `instanceof RebindableContainer` guard).
  *  2. **Deny the engine's native `/subscriptions/plans*` mounts** (the platform-authority ruling
  *     documented on {@see SubscriptionsIntegrationServiceProvider}): its `boot()` unconditionally
  *     calls `loadRoutesFrom(vendor/glueful/subscriptions/routes.php)`, mounting a complete second
@@ -105,7 +105,7 @@ final class EnginePreemptionServiceProvider extends ServiceProvider implements D
      * AUTO-COMPILES the container on every boot whenever `APP_ENV=production && !APP_DEBUG`
      * (`Framework::buildContainer()` computes `$prod` from exactly that pair) — there is no separate
      * CLI "container:compile" step to opt into or out of. Today that inline compile always THROWS and
-     * falls back to the plain `GluefulContainer`, for two reasons this pack does not own:
+     * fell back to the plain runtime container (before framework 1.82.0), for two reasons this pack does not own:
      * `ContainerCompiler::compile()` rejects any `FactoryDefinition` outright (the engine registers
      * several), and it cannot serialize the `ApplicationContext` `ValueDefinition` `ContainerFactory`
      * itself binds. If a routine `composer update` ever fixes either upstream limitation, compilation
@@ -118,7 +118,10 @@ final class EnginePreemptionServiceProvider extends ServiceProvider implements D
      */
     private function rebindSubjectResolver(): void
     {
-        if (!$this->app instanceof GluefulContainer) {
+        // Guard on the INTERFACE (framework ≥ 1.82.1): the runtime Container and the compiled
+        // container both implement it, so this re-pin reaches production's compiled container
+        // — guarding on the concrete Container class silently skipped it there.
+        if (!$this->app instanceof RebindableContainer) {
             return;
         }
 
