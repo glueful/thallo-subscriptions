@@ -916,7 +916,14 @@ final class SelfBillingController
     private function purchasablePlans(string $gateway): array
     {
         return array_values(array_map(
-            static fn (array $plan): array => ['plan_key' => $plan['plan_key'], 'name' => $plan['name']],
+            // The display price rides along for the picker; never the uuid or gateway identifier.
+            static fn (array $plan): array => [
+                'plan_key' => $plan['plan_key'],
+                'name' => $plan['name'],
+                'price_amount' => $plan['price_amount'] ?? null,
+                'price_currency' => $plan['price_currency'] ?? null,
+                'billing_interval' => $plan['billing_interval'] ?? null,
+            ],
             PlanPurchasability::forGateway($this->context, $gateway),
         ));
     }
