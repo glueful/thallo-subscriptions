@@ -139,8 +139,10 @@ final class SelfBillingController
 
         $subscription = null;
         $purchasablePlans = [];
+        $planChangeSupported = false;
         if ($engine !== null) {
             $subscription = $this->projectSubscription($engine, $workspaceUuid);
+            $planChangeSupported = $this->planChangeSupported($engine, $workspaceUuid);
             $capability = $this->gatewayCapability->evaluate();
             if ($capability['capable'] === true && $capability['gateway'] !== null) {
                 $purchasablePlans = $this->purchasablePlans($capability['gateway']);
@@ -163,6 +165,8 @@ final class SelfBillingController
             'operator_contact_required' => $operatorContactReason !== null,
             'operator_contact_reason' => $operatorContactReason,
             'purchasable_plans' => $purchasablePlans,
+            // Whether Change plan can switch the live subscription at its provider.
+            'plan_change_supported' => $planChangeSupported,
         ], 'Billing status retrieved');
     }
 
@@ -454,6 +458,116 @@ final class SelfBillingController
      * checkout `abandoned`, or leaving any one of the three writes applied without the other two,
      * is therefore impossible.
      */
+    /**
+     * Move the workspace's live subscription to another plan at the provider. Refused before any
+     * provider call when there is no provider-managed subscription, when the gateway cannot switch
+     * a live plan (Paystack: cancel at period end and subscribe again), or when the plan cannot be
+     * bought through that gateway. The local subscription follows the provider's own
+     * subscription-updated event, so a success here is 202: requested, not yet applied.
+     */
+    #[ApiOperation(summary: 'Change the workspace subscription\'s plan', tags: ['Thallo Subscriptions'])]
+    public function changePlan(Request $request): Response
+    {
+        if ($this->actorUuid($request) === null) {
+            return Response::error('Authentication is required.', 401);
+        }
+        $workspaceUuid = $this->resolveWorkspace();
+        if ($workspaceUuid instanceof Response) {
+            return $workspaceUuid;
+        }
+        try {
+            $engine = $this->gateway->requireServices();
+        } catch (EngineUnavailableException $e) {
+            return $this->engineUnavailable($e);
+        }
+
+        $subscription = $engine->subscriptions()->current($workspaceUuid);
+        $providerSubscriptionId = $this->stringField($subscription, 'provider_subscription_id');
+        if ($subscription === null || $providerSubscriptionId === '') {
+            return Response::error(
+                'This workspace has no provider-managed subscription to change.',
+                409,
+                ['code' => 'not_provider_managed'],
+            );
+        }
+        $providerGateway = $this->stringField($subscription, 'provider_gateway');
+        if (!$this->payvia->hasGatewayManager()) {
+            return $this->payviaUnavailableResponse();
+        }
+        try {
+            $driver = $this->payvia->gatewayManager()->gateway($providerGateway);
+        } catch (\Throwable) {
+            return $this->payviaUnavailableResponse();
+        }
+        if (!self::canChangePlan($driver)) {
+            return Response::error(
+                'The payment provider cannot switch a live subscription to another plan. Cancel it at '
+                    . 'the end of the period, then subscribe to the new plan.',
+                409,
+                ['code' => 'plan_change_unsupported'],
+            );
+        }
+
+        $planKey = trim((string) ($this->jsonBody($request)['plan_key'] ?? ''));
+        if ($planKey === $this->stringField($subscription, 'plan_key')) {
+            return Response::error('The workspace is already on this plan.', 422, ['code' => 'already_on_plan']);
+        }
+        $target = null;
+        foreach (PlanPurchasability::forGateway($this->context, $providerGateway) as $plan) {
+            if ($plan['plan_key'] === $planKey) {
+                $target = $plan;
+            }
+        }
+        if ($target === null) {
+            return Response::error(
+                'This plan cannot be bought through the active payment gateway.',
+                409,
+                ['code' => 'plan_not_purchasable'],
+            );
+        }
+
+        /** @var array{status: string, message?: string} $answer */
+        $answer = $driver->changeSubscriptionPlan($providerSubscriptionId, (string) $target['provider_identifier']);
+        if (($answer['status'] ?? null) !== 'changed') {
+            return Response::error(
+                'The payment provider refused the plan change: ' . ($answer['message'] ?? 'no reason given') . '.',
+                502,
+                ['code' => 'provider_refused'],
+            );
+        }
+
+        return new Response(
+            ['success' => true, 'message' => 'Plan change requested.', 'data' => ['plan_key' => $planKey]],
+            202,
+        );
+    }
+
+    private function planChangeSupported(EngineServices $engine, string $workspaceUuid): bool
+    {
+        $subscription = $engine->subscriptions()->current($workspaceUuid);
+        if (
+            $this->stringField($subscription, 'provider_subscription_id') === ''
+            || !$this->payvia->hasGatewayManager()
+        ) {
+            return false;
+        }
+        try {
+            return self::canChangePlan(
+                $this->payvia->gatewayManager()->gateway($this->stringField($subscription, 'provider_gateway')),
+            );
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /** Whether a Payvia driver can move a live subscription to another plan (Payvia 2.9+). */
+    private static function canChangePlan(object $driver): bool
+    {
+        $capability = 'Glueful\\Extensions\\Payvia\\Contracts\\SubscriptionPlanChangeCapableGateway';
+
+        return interface_exists($capability) && $driver instanceof $capability;
+    }
+
     #[ApiOperation(summary: 'Abandon the workspace\'s stuck pending checkout', tags: ['Thallo Subscriptions'])]
     public function abandon(Request $request): Response
     {

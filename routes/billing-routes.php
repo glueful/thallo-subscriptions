@@ -43,6 +43,9 @@ $router->group(
         $router->post('/cancel', [SelfBillingController::class, 'cancel'])
             ->middleware('content_permission:billing.manage')
             ->name('thallo.subscriptions.billing.cancel');
+        $router->post('/plan', [SelfBillingController::class, 'changePlan'])
+            ->middleware('content_permission:billing.manage')
+            ->name('thallo.subscriptions.billing.plan');
         $router->post('/checkout/abandon', [SelfBillingController::class, 'abandon'])
             ->middleware('content_permission:billing.manage')
             ->name('thallo.subscriptions.billing.checkout.abandon');
