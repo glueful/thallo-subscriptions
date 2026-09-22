@@ -12,7 +12,7 @@ use Thallo\Subscriptions\Engine\EngineGateway;
 
 /**
  * Task 18 (Phase C, workspace self-serve checkout plan, spec §5.4): the pricing-blocks →
- * billing deep-link bridge. Bound under the CONTRACT id ({@see PlanCheckoutUrlResolver})
+ * signup-then-billing deep-link bridge. Bound under the CONTRACT id ({@see PlanCheckoutUrlResolver})
  * in {@see \Thallo\Subscriptions\SubscriptionsIntegrationServiceProvider::services()} so
  * thallo-render's soft `has()` probe — its own established idiom for every optional
  * cross-pack contract (media()/site_logo()/form_render()/shop_*()) — can consult it
@@ -68,6 +68,8 @@ final class AdminBillingPlanCheckoutUrlResolver implements PlanCheckoutUrlResolv
             return null;
         }
 
-        return rtrim($adminUrl, '/') . '/billing?plan=' . rawurlencode($planKey);
+        // The admin's public signup page: a new visitor creates their workspace there and goes on to
+        // billing for this plan; a visitor already signed in is sent straight to billing.
+        return rtrim($adminUrl, '/') . '/signup?plan=' . rawurlencode($planKey);
     }
 }
