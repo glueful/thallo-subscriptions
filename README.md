@@ -36,7 +36,7 @@ The pack ships with Thallo: `glueful/thallo-core` requires it at the same versio
 `config/serviceproviders.php` loads its provider. It registers the `thallo.subscriptions`
 capability, whose owning package is `glueful/subscriptions`. A new project enables that extension,
 so the capability is **on by default**. An operator turns it off or on in the admin under
-**Extensions › Capabilities** (stored system-wide; it overrides the deploy-time
+**Features** (stored system-wide; it overrides the deploy-time
 `thallo.capabilities` config map). Self-serve checkout also needs `glueful/payvia` enabled
 (`php glueful extensions:enable glueful/payvia`) and a gateway that supports subscription checkout,
 configured in **Settings › Payments**.
