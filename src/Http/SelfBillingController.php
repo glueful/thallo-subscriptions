@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Thallo\Subscriptions\Http;
 
+use Thallo\Contracts\Payments\OnlinePaymentInitiation;
 use Glueful\Auth\UserIdentity;
 use Glueful\Bootstrap\ApplicationContext;
 use Glueful\Events\EventService;
@@ -159,6 +160,8 @@ final class SelfBillingController
         return Response::success([
             'engine' => $engineState,
             'self_serve_checkout_enabled' => $this->selfServe->isEnabled(),
+            // Whether a new online payment may start (Payments on); checkout is refused while not.
+            'payments_enabled' => $this->onlinePaymentRefusal() === null,
             'workspace_uuid' => $workspaceUuid,
             'subscription' => $subscription,
             'origination' => $origination,
@@ -220,6 +223,11 @@ final class SelfBillingController
             $engine = $this->gateway->requireServices();
         } catch (EngineUnavailableException $e) {
             return $this->engineUnavailable($e);
+        }
+
+        // A self-serve checkout starts an online payment: refused while Payments is off.
+        if (($refusal = $this->onlinePaymentRefusal()) !== null) {
+            return Response::error($refusal, 409, ['code' => 'payments_off']);
         }
 
         $current = $engine->subscriptions()->current($workspaceUuid);
@@ -1194,5 +1202,16 @@ final class SelfBillingController
         $decoded = json_decode($content, true);
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    /** Why a new online payment may not start now (Payments off), or null while it may. */
+    private function onlinePaymentRefusal(): ?string
+    {
+        $container = $this->context->getContainer();
+        if (!$container->has(OnlinePaymentInitiation::class)) {
+            return null;
+        }
+        $initiation = $container->get(OnlinePaymentInitiation::class);
+        return $initiation->allowed() ? null : ($initiation->refusal() ?? 'Payments is off.');
     }
 }

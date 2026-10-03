@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Thallo\Subscriptions\Bridge;
 
+use Thallo\Contracts\Payments\OnlinePaymentInitiation;
 use Glueful\Bootstrap\ApplicationContext;
 use Thallo\Contracts\Billing\PlanCheckoutUrlResolver;
 use Thallo\Contracts\Capability\CapabilityRegistry;
@@ -50,6 +51,14 @@ final class AdminBillingPlanCheckoutUrlResolver implements PlanCheckoutUrlResolv
         if (
             !$container->has(CapabilityRegistry::class)
             || !$container->get(CapabilityRegistry::class)->isEnabled('thallo.subscriptions')
+        ) {
+            return null;
+        }
+
+        // A plan checkout link starts an online payment: none while Payments is off.
+        if (
+            $container->has(OnlinePaymentInitiation::class)
+            && !$container->get(OnlinePaymentInitiation::class)->allowed()
         ) {
             return null;
         }
