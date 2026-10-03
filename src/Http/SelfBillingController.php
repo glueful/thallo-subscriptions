@@ -489,6 +489,11 @@ final class SelfBillingController
             return $this->engineUnavailable($e);
         }
 
+        // A plan change at the provider may bill a prorated amount online: refused while Payments is off.
+        if (($refusal = $this->onlinePaymentRefusal()) !== null) {
+            return Response::error($refusal, 409, ['code' => 'payments_off']);
+        }
+
         $subscription = $engine->subscriptions()->current($workspaceUuid);
         $providerSubscriptionId = $this->stringField($subscription, 'provider_subscription_id');
         if ($subscription === null || $providerSubscriptionId === '') {
