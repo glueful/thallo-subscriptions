@@ -11,6 +11,9 @@ use Glueful\Extensions\ServiceProvider;
 use Psr\Container\ContainerInterface;
 use Thallo\Contracts\Billing\PlanCheckoutUrlResolver;
 use Thallo\Contracts\Capability\Capability;
+use Thallo\Contracts\Capability\ManagementMode;
+use Thallo\Contracts\Capability\ActivationCopy;
+use Thallo\Contracts\Capability\DeclaresCapabilities;
 use Thallo\Contracts\Capability\CapabilityRegistry;
 use Thallo\Subscriptions\Bridge\AdminBillingPlanCheckoutUrlResolver;
 use Thallo\Subscriptions\Checkout\PayviaCheckoutGateway;
@@ -55,7 +58,9 @@ use function app;
  * NO provider's `register()` runs at all, while this provider must `loadAfter()` the engine and so
  * can never win a `boot()`-time race with it).
  */
-final class SubscriptionsIntegrationServiceProvider extends ServiceProvider implements DeclaresLoadOrder
+final class SubscriptionsIntegrationServiceProvider extends ServiceProvider implements
+    DeclaresLoadOrder,
+    DeclaresCapabilities
 {
     /**
      * Source-verified edge (modules-not-extensions spec §5.2, mirroring
@@ -249,16 +254,32 @@ final class SubscriptionsIntegrationServiceProvider extends ServiceProvider impl
         );
     }
 
+    public function capabilities(): array
+    {
+        return [
+            new Capability(
+                'thallo.subscriptions',
+                label: 'Subscriptions',
+                description: 'Workspace SaaS billing: platform plans and per-workspace subscriptions.',
+                owningPackage: 'glueful/subscriptions',
+                management: ManagementMode::Activation,
+                copy: new ActivationCopy(
+                    turnOn: 'This prepares billing and adds plans, subscriptions and their blocks. '
+                        . 'Your existing content is kept.',
+                    turnOff: "Subscriptions' pages, blocks and menu are hidden. Plans, subscribers and your "
+                        . 'content are kept, and you can turn it on again.',
+                    links: [
+                        ['label' => 'Plans', 'to' => '/subscriptions/plans'],
+                        ['label' => 'Block types', 'to' => '/settings/block-types'],
+                    ],
+                ),
+            ),
+        ];
+    }
+
     public function boot(ApplicationContext $context): void
     {
         $registry = app($context, CapabilityRegistry::class);
-
-        $registry->register(new Capability(
-            'thallo.subscriptions',
-            label: 'Subscriptions',
-            description: 'Workspace SaaS billing: platform plans and per-workspace subscriptions.',
-            owningPackage: 'glueful/subscriptions',
-        ));
 
         // Gated by ENABLED state (mirrors CommerceIntegrationServiceProvider::boot()): the
         // user-facing HTTP surface only. Task 8 (Phase B): the platform Plans admin API --
