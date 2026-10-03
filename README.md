@@ -34,12 +34,12 @@ through `rate.tier.{tier}` entitlements.
 
 The pack ships with Thallo: `glueful/thallo-core` requires it at the same version and the project's
 `config/serviceproviders.php` loads its provider. It registers the `thallo.subscriptions`
-capability, whose owning package is `glueful/subscriptions`. A new project enables that extension,
-so the capability is **on by default**. An operator turns it off or on in the admin under
-**Extensions › Capabilities** (stored system-wide; it overrides the deploy-time
-`thallo.capabilities` config map). Self-serve checkout also needs `glueful/payvia` enabled
-(`php glueful extensions:enable glueful/payvia`) and a gateway that supports subscription checkout,
-configured in **Settings › Payments**.
+capability, whose owning package is `glueful/subscriptions`. It is an activation capability: it is
+on only once an operator turns it on in **Extensions › Capabilities** (or
+`php glueful thallo:capabilities:enable thallo.subscriptions`), which prepares everything it needs
+first; the first-run setup leaves it off. Self-serve checkout also needs the **Payments**
+capability on (`php glueful thallo:capabilities:enable thallo.payments`) and a gateway that supports
+subscription checkout, configured in **Settings › Payments**.
 
 ## Documentation
 
